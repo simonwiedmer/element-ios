@@ -170,6 +170,10 @@ class NotificationService: UNNotificationServiceExtension {
                 MXLog.debug("[NotificationService] setup: MXBackgroundSyncService init: AFTER")
                 self.logMemory()
             }
+            if NotificationService.restClient?.credentials != userAccount.mxCredentials {
+                NotificationService.restClient = MXRestClient(credentials: userAccount.mxCredentials,
+                                                              unrecognizedCertificateHandler: nil)
+            }
             completion()
         } else {
             MXLog.debug("[NotificationService] setup: No active accounts")
@@ -614,29 +618,141 @@ class NotificationService: UNNotificationServiceExtension {
         
         ongoingVoIPPushRequests[event.eventId] = true
         
-        let appId = BuildSettings.pushKitAppId
-        
-        pushGatewayRestClient.notifyApp(withId: appId,
-                                        pushToken: token,
-                                        eventId: event.eventId,
-                                        roomId: event.roomId,
-                                        eventType: nil,
-                                        sender: event.sender,
-                                        timeout: NSE.Constants.voipPushRequestTimeout,
-                                        success: { [weak self] (rejected) in
-                                            MXLog.debug("[NotificationService] sendVoipPush succeeded, rejected tokens: \(rejected)")
-                                            
-                                            guard let self = self else { return }
-                                            self.ongoingVoIPPushRequests.removeValue(forKey: event.eventId)
-                                            
-                                            self.fallbackToBestAttemptContent(forEventId: event.eventId)
-                                        }) { [weak self] (error) in
-            MXLog.debug("[NotificationService] sendVoipPush failed with error: \(error)")
-            
+        fetchDisplayName(forEvent: event) { [weak self] in
             guard let self = self else { return }
-            self.ongoingVoIPPushRequests.removeValue(forKey: event.eventId)
             
-            self.fallbackToBestAttemptContent(forEventId: event.eventId)
+            let appId = BuildSettings.pushKitAppId
+            
+            self.pushGatewayRestClient.notifyApp(withId: appId,
+                                                 pushToken: token,
+                                                 eventId: event.eventId,
+                                                 roomId: event.roomId,
+                                                 eventType: nil,
+                                                 sender: event.sender,
+                                                 timeout: NSE.Constants.voipPushRequestTimeout,
+                                                 success: { [weak self] (rejected) in
+                                                MXLog.debug("[NotificationService] sendVoipPush succeeded, rejected tokens: \(rejected)")
+                                                
+                                                guard let self = self else { return }
+                                                self.ongoingVoIPPushRequests.removeValue(forKey: event.eventId)
+                                                
+                                                self.fallbackToBestAttemptContent(forEventId: event.eventId)
+                                            }) { [weak self] (error) in
+                MXLog.debug("[NotificationService] sendVoipPush failed with error: \(error)")
+                
+                guard let self = self else { return }
+                self.ongoingVoIPPushRequests.removeValue(forKey: event.eventId)
+                
+                self.fallbackToBestAttemptContent(forEventId: event.eventId)
+            }
+        }
+    }
+    
+}
+
+//  MARK: - Aarenet Additions
+
+enum FetchNativeUserError: Int, Error {
+    case noRestClient
+    case noUser
+    case unknown
+}
+
+extension NotificationService {
+    
+    /// Cache for virtual userId -> native userId lookup. Keys are virtual user identifiers, values are native user identifiers
+    private static var nativeUsersMap: [String: MXThirdPartyUserInstance] = [:]
+    
+    fileprivate static var restClient: MXRestClient!
+    
+    fileprivate func fetchDisplayName(forEvent event: MXEvent,
+                                      completion: @escaping () -> Void) {
+        let userDispatchGroup = DispatchGroup()
+        var userIdForLookup: String?
+        
+        userDispatchGroup.enter()
+        fetchNativeUser(fromUserId: event.sender) { response in
+            switch response {
+            case .success(let user):
+                userIdForLookup = user.userId
+                userDispatchGroup.leave()
+            case .failure(let error):
+                if let error = error as? FetchNativeUserError, error == FetchNativeUserError.noUser {
+                    userIdForLookup = event.sender
+                    userDispatchGroup.leave()
+                } else {
+                    userDispatchGroup.leave()
+                }
+            }
+        }
+        
+        userDispatchGroup.notify(queue: .main) {
+            if let userId = userIdForLookup {
+                self.fetchDisplayName(forEvent: event,
+                                      userId: userId,
+                                      completion: completion)
+            } else {
+                completion()
+            }
+        }
+    }
+    
+    private func fetchNativeUser(fromUserId virtualUserId: String,
+                                     completion: @escaping (MXResponse<MXThirdPartyUserInstance>) -> Void) {
+        //  lookup in cache
+        if let nativeUser = Self.nativeUsersMap[virtualUserId] {
+            completion(.success(nativeUser))
+            return
+        }
+        guard let restClient = NotificationService.restClient else {
+            completion(.failure(FetchNativeUserError.noRestClient))
+            return
+        }
+        
+        restClient.thirdpartyUsers(kMXProtocolVectorSipNative,
+                                   fields: ["virtual_mxid": virtualUserId]) { response in
+            if let response = response, let user = response.users.first, user.userId.count > 0 {
+                Self.nativeUsersMap[virtualUserId] = user
+                completion(.success(user))
+            } else {
+                completion(.failure(FetchNativeUserError.noUser))
+            }
+        } failure: { error in
+            if let error = error {
+                completion(.failure(error))
+            } else {
+                completion(.failure(FetchNativeUserError.unknown))
+            }
+        }
+
+    }
+    
+    private func fetchDisplayName(forEvent event: MXEvent,
+                                  userId: String,
+                                  completion: @escaping () -> Void) {
+        if pushNotificationStore.displayName(forUserId: event.sender) != nil {
+            //  we already have display name for this userId
+            completion()
+            return
+        }
+        
+        guard let restClient = NotificationService.restClient else {
+            completion()
+            return
+        }
+        
+        restClient.displayName(forUser: userId) { [weak self] response in
+            guard let self = self else {
+                completion()
+                return
+            }
+            switch response {
+            case .success(let displayName):
+                self.pushNotificationStore.storeDisplayName(displayName, forUserId: event.sender)
+                completion()
+            case .failure:
+                completion()
+            }
         }
     }
     
