@@ -78,3 +78,21 @@ final class PushNotificationStore: NSObject {
         try? store.removeAll()
     }
 }
+
+//  MARK: - Aarenet Additions
+
+extension PushNotificationStore {
+    
+    func displayName(forUserId userId: String) -> String? {
+        return try? store.string(forKey: userId)
+    }
+    
+    func storeDisplayName(_ displayName: String, forUserId userId: String) {
+        try? store.set(displayName, forKey: userId)
+    }
+    
+    func removeDisplayName(forUserId userId: String) {
+        try? store.removeObject(forKey: userId)
+    }
+    
+}
