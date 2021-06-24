@@ -581,13 +581,13 @@ Matrix session observer used to detect new opened sessions.
                     [session.callManager handleCallEvent:callInvite];
                     MXCallInviteEventContent *content = [MXCallInviteEventContent modelFromJSON:callInvite.content];
                     MXCall *call = [session.callManager callWithCallId:content.callId];
-                    if (call.callerName == nil)
-                    {
-                        call.callerName = [self.pushNotificationStore displayNameForUserId:callInvite.sender];
-                        [self.pushNotificationStore removeDisplayNameForUserId:callInvite.sender];
-                    }
                     if (call)
                     {
+                        if (call.callerName == nil)
+                        {
+                            call.callerName = [self.pushNotificationStore displayNameForUserId:callInvite.sender];
+                            [self.pushNotificationStore removeDisplayNameForUserId:callInvite.sender];
+                        }
                         [session.callManager.callKitAdapter reportIncomingCall:call];
                         MXLogDebug(@"[PushNotificationService] didReceiveIncomingPushWithPayload: Reporting new call in room %@ for the event: %@", roomId, eventId);
                         
